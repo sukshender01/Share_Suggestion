@@ -1,150 +1,156 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import streamlit as st
-import datetime
+import matplotlib.pyplot as plt
+from datetime import datetime
 
-# --------------------------------------------------
-# Fetch NSE Index Symbols (using yfinance instead of Moneycontrol)
-# --------------------------------------------------
-def fetch_index_symbols(universe="NIFTY 50"):
-    if universe == "NIFTY 50":
-        index_symbol = "^NSEI"  # NIFTY 50
-    elif universe == "NIFTY 100":
-        index_symbol = "^CNX100"  # NIFTY 100
-    else:
-        st.error("Unsupported universe selected")
-        return [], []
+# -----------------------------
+# Configurations
+# -----------------------------
+st.set_page_config(page_title="Smart Share Market Recommendations", layout="wide")
 
-    # Download index components using yfinance
-    index = yf.Ticker(index_symbol)
-    components = index.constituents  # available in yfinance >=0.2.54
-
-    if components is None:
-        st.error("Failed to fetch index constituents.")
-        return [], []
-
-    company_names = components["Company"].tolist()
-    symbols = components.index.tolist()
-    return company_names, symbols
-
-# --------------------------------------------------
-# Compute Features
-# --------------------------------------------------
-def compute_features(df):
-    df['return'] = df['Adj Close'].pct_change()
-    df['rsi14'] = compute_rsi(df['Adj Close'], 14)
-    df['sma20'] = df['Adj Close'].rolling(window=20).mean()
-    df['sma50'] = df['Adj Close'].rolling(window=50).mean()
-    df['volatility'] = df['return'].rolling(window=20).std()
-    df['ret_60'] = df['Adj Close'].pct_change(60)
-    return df
-
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-# --------------------------------------------------
-# Ranking Modes with simple explanations
-# --------------------------------------------------
-ranking_modes = {
-    "Growth Focus": "Focus on high-return stocks. Higher risk, higher reward. Suggested for aggressive investors. Time horizon: 12–24 months.",
-    "Balanced": "Mix of growth and stability. Moderate risk and steady returns. Suitable for medium-term investors. Time horizon: 6–12 months.",
-    "Safe & Steady": "Focus on low volatility and stable performance. Lower risk, lower reward. Suitable for beginners. Time horizon: 12+ months.",
-    "Quick Gains": "Short-term momentum opportunities. High risk, short-term reward. Suitable for small allocations. Time horizon: 1–3 months."
-}
-
-def rank_stocks(df, mode="Balanced"):
-    if mode == "Growth Focus":
-        df["score"] = df["ret_60"] - df["volatility"]
-    elif mode == "Safe & Steady":
-        df["score"] = -df["volatility"]
-    elif mode == "Quick Gains":
-        df["score"] = (df["sma20"] - df["sma50"]) / df["sma50"]
-    else:  # Balanced
-        df["score"] = (df["ret_60"] * 0.5) - (df["volatility"] * 0.5)
-    return df.sort_values("score", ascending=False)
-
-# --------------------------------------------------
-# Generate Investment Suggestion
-# --------------------------------------------------
-def get_investment_plan(score, mode):
-    if mode == "Growth Focus":
-        return "₹50,000 – ₹1,00,000 for 1–2 years. High risk, potential high reward."
-    elif mode == "Safe & Steady":
-        return "₹20,000 – ₹50,000 for 1+ years. Low risk, stable returns."
-    elif mode == "Quick Gains":
-        return "₹10,000 – ₹25,000 for 1–3 months. High risk, short-term gains."
-    else:
-        return "₹30,000 – ₹75,000 for 6–12 months. Balanced approach."
-
-# --------------------------------------------------
-# Streamlit UI
-# --------------------------------------------------
-st.set_page_config(page_title="Stock Recommendation AI", layout="wide")
-
-# Themes
+# -----------------------------
+# Themes for UI
+# -----------------------------
 themes = {
-    "Light": {"bg": "#ffffff", "text": "#000000"},
-    "Dark": {"bg": "#0e1117", "text": "#ffffff"},
-    "Blue": {"bg": "#e6f0ff", "text": "#003366"},
-    "Green": {"bg": "#e8f5e9", "text": "#1b5e20"},
+    "Light": {"bgcolor": "#FFFFFF", "textcolor": "#000000"},
+    "Dark": {"bgcolor": "#1E1E1E", "textcolor": "#FFFFFF"},
+    "Blue": {"bgcolor": "#E6F0FF", "textcolor": "#003366"},
+    "Green": {"bgcolor": "#E9F7EF", "textcolor": "#145A32"},
 }
-
-theme_choice = st.sidebar.radio("Choose Theme", list(themes.keys()))
-theme = themes[theme_choice]
+theme_choice = st.sidebar.selectbox("🎨 Choose Theme", list(themes.keys()))
 st.markdown(
     f"""
     <style>
-    .reportview-container {{
-        background-color: {theme['bg']};
-        color: {theme['text']};
-    }}
+        .reportview-container {{
+            background-color: {themes[theme_choice]["bgcolor"]};
+            color: {themes[theme_choice]["textcolor"]};
+        }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("📈 AI-Based Stock Market Recommendation Tool")
-st.write("Smart, simple, and beginner-friendly stock suggestions with investment guidance.")
+# -----------------------------
+# Fetch index symbols
+# -----------------------------
+def fetch_index_symbols(universe="NIFTY50"):
+    try:
+        index = yf.Ticker("^NSEI") if universe == "NIFTY50" else yf.Ticker("^BSESN")
+        if hasattr(index, "constituents"):
+            comp = index.constituents
+            names = list(comp.keys())
+            syms = list(comp.values())
+            return names, syms
+    except Exception:
+        pass
 
-universe = st.sidebar.selectbox("Select Stock Universe", ["NIFTY 50", "NIFTY 100"])
-ranking_mode = st.sidebar.radio("Select Strategy", list(ranking_modes.keys()))
-st.info(ranking_modes[ranking_mode])
+    # fallback: static list of NIFTY50 top companies
+    nifty50 = {
+        "Reliance Industries": "RELIANCE.NS",
+        "HDFC Bank": "HDFCBANK.NS",
+        "Infosys": "INFY.NS",
+        "ICICI Bank": "ICICIBANK.NS",
+        "TCS": "TCS.NS",
+        "Kotak Mahindra Bank": "KOTAKBANK.NS",
+        "Axis Bank": "AXISBANK.NS",
+        "ITC": "ITC.NS",
+        "Bharti Airtel": "BHARTIARTL.NS",
+        "Hindustan Unilever": "HINDUNILVR.NS"
+    }
+    return list(nifty50.keys()), list(nifty50.values())
 
-company_names, symbols = fetch_index_symbols(universe)
+# -----------------------------
+# Compute features
+# -----------------------------
+def compute_features(df):
+    df["ret_20"] = df["Adj Close"].pct_change(20)
+    df["ret_60"] = df["Adj Close"].pct_change(60)
+    df["volatility"] = df["Adj Close"].pct_change().rolling(20).std()
+    return df
 
-if symbols:
-    end = datetime.date.today()
-    start = end - datetime.timedelta(days=365)
-    stock_features = {}
-
-    for sym in symbols[:10]:  # Limit for demo
-        df = yf.download(sym + ".NS", start=start, end=end)
-        if not df.empty:
-            stock_features[sym] = compute_features(df)
-
-    results = []
-    for sym, df in stock_features.items():
+# -----------------------------
+# Ranking method
+# -----------------------------
+def rank_stocks(features):
+    scores = {}
+    for sym, df in features.items():
+        if df.empty:
+            continue
         latest = df.iloc[-1]
-        row = {
+        score = (
+            (latest["ret_20"] * 0.4) +
+            (latest["ret_60"] * 0.4) -
+            (latest["volatility"] * 0.2)
+        )
+        scores[sym] = score
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+# -----------------------------
+# Investment suggestion generator
+# -----------------------------
+def generate_suggestions(ranked, names_map):
+    suggestions = []
+    for i, (sym, score) in enumerate(ranked[:5], start=1):
+        name = names_map.get(sym, sym)
+        if i == 1:
+            risk, amt, dur = "Low", "₹1,00,000", "3 years"
+        elif i == 2:
+            risk, amt, dur = "Moderate", "₹75,000", "2-3 years"
+        elif i == 3:
+            risk, amt, dur = "Moderate", "₹50,000", "2 years"
+        elif i == 4:
+            risk, amt, dur = "High", "₹25,000", "1-2 years"
+        else:
+            risk, amt, dur = "High", "₹10,000", "1 year"
+
+        suggestions.append({
+            "Rank": i,
+            "Company": name,
             "Symbol": sym,
-            "Price": latest["Adj Close"],
-            "RSI(14)": round(latest["rsi14"], 2),
-            "Volatility": round(latest["volatility"], 4),
-            "60D Return": round(latest["ret_60"], 4),
-        }
-        results.append(row)
+            "Score": round(score, 3),
+            "Suggested Investment": amt,
+            "Time Duration": dur,
+            "Risk": risk,
+            "Description": f"{name} is ranked #{i}. Risk: {risk}. Suggested to invest {amt} for {dur} with potential returns depending on market conditions."
+        })
+    return suggestions
 
-    results_df = pd.DataFrame(results)
-    ranked_df = rank_stocks(results_df, ranking_mode).head(5)
+# -----------------------------
+# Main
+# -----------------------------
+st.title("📈 Smart Share Market Recommendation System")
 
-    # Add investment suggestions
-    ranked_df["Suggested Investment Plan"] = ranked_df["score"].apply(lambda x: get_investment_plan(x, ranking_mode))
+universe = st.sidebar.selectbox("Select Universe", ["NIFTY50", "SENSEX"])
+company_names, symbols = fetch_index_symbols(universe)
+name_map = dict(zip(symbols, company_names))
 
-    st.subheader("📊 Top 5 Stock Recommendations")
-    st.dataframe(ranked_df, use_container_width=True)
+data = {}
+features = {}
+for sym in symbols:
+    try:
+        df = yf.download(sym, period="1y", interval="1d", progress=False)
+        if not df.empty:
+            df = compute_features(df)
+            data[sym] = df
+            features[sym] = df
+    except Exception as e:
+        st.warning(f"Could not fetch {sym}: {e}")
+
+ranked = rank_stocks(features)
+if ranked:
+    st.subheader("Top Investment Suggestions")
+    suggestions = generate_suggestions(ranked, name_map)
+    df_suggestions = pd.DataFrame(suggestions)
+    st.dataframe(df_suggestions, use_container_width=True)
+
+    # Chart for top stock
+    top_sym = ranked[0][0]
+    st.subheader(f"📊 Price Trend - {name_map.get(top_sym, top_sym)}")
+    plt.figure(figsize=(10, 5))
+    plt.plot(data[top_sym].index, data[top_sym]["Adj Close"])
+    plt.title(f"{top_sym} Price Trend (1 Year)")
+    st.pyplot(plt)
+else:
+    st.warning("No data available for recommendations.")
