@@ -1,201 +1,170 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import numpy as np
 import matplotlib.pyplot as plt
-from io import BytesIO
-import base64
+from sklearn.preprocessing import MinMaxScaler
+from datetime import datetime, timedelta
 
-# ------------------------------------------------------
-# THEME SELECTION
-# ------------------------------------------------------
+# --------------------------
+# THEME OPTIONS
+# --------------------------
 themes = {
-    "Light": {"bg": "#ffffff", "text": "#000000"},
-    "Dark": {"bg": "#1e1e1e", "text": "#ffffff"},
-    "Blue": {"bg": "#e6f0ff", "text": "#003366"},
-    "Green": {"bg": "#e9f7ef", "text": "#145a32"},
+    "Light": {"bg": "#FFFFFF", "text": "#000000", "accent": "#1E88E5"},
+    "Dark": {"bg": "#0E1117", "text": "#FAFAFA", "accent": "#BB86FC"},
+    "Blue": {"bg": "#E3F2FD", "text": "#0D47A1", "accent": "#1976D2"},
+    "Green": {"bg": "#E8F5E9", "text": "#1B5E20", "accent": "#43A047"}
 }
 
-theme_choice = st.sidebar.selectbox("Choose Theme", list(themes.keys()))
+# --------------------------
+# CONFIGURATION
+# --------------------------
+st.set_page_config(page_title="Indian Stock Suggestions", layout="wide")
+
+theme_choice = st.sidebar.radio("🎨 Choose Theme", list(themes.keys()))
+theme = themes[theme_choice]
 st.markdown(
     f"""
     <style>
     .reportview-container {{
-        background-color: {themes[theme_choice]["bg"]};
-        color: {themes[theme_choice]["text"]};
+        background-color: {theme['bg']};
+        color: {theme['text']};
+    }}
+    .stMarkdown, .stDataFrame, .stRadio, .stSelectbox, .stText {{
+        color: {theme['text']} !important;
+    }}
+    .stButton>button {{
+        background-color: {theme['accent']} !important;
+        color: white !important;
+        border-radius: 8px;
     }}
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# ------------------------------------------------------
-# RANKING MODE EXPLANATION
-# ------------------------------------------------------
-ranking_explanations = {
-    "Growth": "Focuses on fast-growing stocks. Higher potential returns, but also higher risk. Suitable for short to medium-term investments (6–18 months).",
-    "Value": "Focuses on undervalued stocks that may rise steadily. Lower risk than growth but takes time to show returns. Suitable for medium to long-term investments (1–3 years).",
-    "Momentum": "Picks stocks already moving upward. Good for quick gains, but requires close monitoring. Suitable for short-term investments (1–6 months).",
-    "Balanced": "Mix of growth, value, and momentum. Moderate risk and returns. Suitable for all types of investors with 1–2 year horizon."
+st.title("📈 Smart Stock Suggestions (India)")
+
+# --------------------------
+# Ranking Methods Explained
+# --------------------------
+ranking_descriptions = {
+    "Composite Score": "📊 Balanced approach. Combines momentum, distance from 52-week high, and RSI. Good for medium-risk investors. Suggested holding: 6–12 months.",
+    "3M Momentum": "🚀 Focuses on stocks rising steadily in the last 3 months. High potential but medium-to-high risk. Suggested holding: 3–6 months.",
+    "Near 52W High": "🔔 Stocks close to their yearly high. Often shows strength, but may have limited upside. Suggested holding: 2–4 months."
 }
 
-# ------------------------------------------------------
-# FETCH STOCK DATA
-# ------------------------------------------------------
-def fetch_stock_data(symbols, period="6mo"):
-    data = {}
-    for sym in symbols:
-        try:
-            df = yf.download(sym, period=period, progress=False)
-            if not df.empty:
-                data[sym] = df
-        except Exception:
-            pass
-    return data
+universe_choice = st.sidebar.radio("📌 Universe", ["NIFTY 50", "NIFTY 500"])
+ranking_mode = st.sidebar.radio("📊 Ranking Mode", list(ranking_descriptions.keys()))
+st.info(ranking_descriptions[ranking_mode])
 
-# ------------------------------------------------------
-# FEATURE ENGINEERING
-# ------------------------------------------------------
+refresh_interval = st.sidebar.slider("⏱ Auto-refresh (minutes)", 1, 30, 5)
+
+# --------------------------
+# STOCK UNIVERSE
+# --------------------------
+nifty50 = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", "HINDUNILVR.NS"]
+nifty500 = nifty50 + ["SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS", "LT.NS", "AXISBANK.NS"]
+
+symbols = nifty50 if universe_choice == "NIFTY 50" else nifty500
+
+# --------------------------
+# FEATURES CALCULATION
+# --------------------------
 def compute_features(df):
-    # Use 'Adj Close' if available, otherwise use 'Close'
     if "Adj Close" in df.columns:
-        price_col = "Adj Close"
+        close = df["Adj Close"]
     else:
-        price_col = "Close"
+        close = df["Close"]
 
-    df['ret_60'] = df[price_col].pct_change(60)
-    df['ret_20'] = df[price_col].pct_change(20)
-    df['52w_high'] = df[price_col].rolling(252).max()
-    df['pct_to_52w_high'] = (df['52w_high'] - df[price_col]) / df['52w_high'] * 100
-    df['ma_14'] = df[price_col].rolling(14).mean()
-
-    # RSI Calculation
-    delta = df[price_col].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df['rsi14'] = 100 - (100 / (1 + rs))
-
+    df["ret_60"] = close.pct_change(60)
+    df["rolling_max"] = close.rolling(252, min_periods=1).max()
+    df["pct_to_52w_high"] = (close / df["rolling_max"]) - 1
+    df["returns"] = close.pct_change()
+    df["up"] = np.where(df["returns"] > 0, df["returns"], 0)
+    df["down"] = np.where(df["returns"] < 0, -df["returns"], 0)
+    roll_up = df["up"].rolling(14, min_periods=1).mean()
+    roll_down = df["down"].rolling(14, min_periods=1).mean()
+    rs = roll_up / (roll_down + 1e-6)
+    df["rsi14"] = 100 - (100 / (1 + rs))
     return df
 
-# ------------------------------------------------------
-# SCORE CALCULATION
-# ------------------------------------------------------
-def calculate_score(row, mode):
-    score = 0
-    if mode == "Growth":
-        score += row.get("ret_60", 0) * 100
-    elif mode == "Value":
-        score += (row.get("pct_to_52w_high", 0)) * 0.5
-    elif mode == "Momentum":
-        score += row.get("ret_20", 0) * 100
-    elif mode == "Balanced":
-        score += (row.get("ret_20", 0) * 50) + (row.get("pct_to_52w_high", 0) * 0.5)
-    return score
+def get_reason(row, ranking_mode):
+    if ranking_mode == "Composite Score":
+        return f"This stock balances momentum, strength, and RSI. Suitable for medium-risk investors. Investment: ₹50,000+ for 6–12 months."
+    elif ranking_mode == "3M Momentum":
+        return f"This stock has shown steady 3-month growth. High return potential but risky. Investment: ₹30,000+ for 3–6 months."
+    elif ranking_mode == "Near 52W High":
+        return f"This stock is trading near its yearly high. Can be safer, but limited upside. Investment: ₹20,000+ for 2–4 months."
+    return "General investment suggestion."
 
-# ------------------------------------------------------
-# REASONS IN SIMPLE TERMS
-# ------------------------------------------------------
-def get_reason(row, mode):
-    if mode == "Growth":
-        if row.get("ret_60", 0) > 0.1:
-            return "This stock grew strongly in the last 3 months, meaning your money could grow faster but comes with higher risk."
-        else:
-            return "Stock growth is moderate; safer but slower returns."
-    elif mode == "Value":
-        return "The stock is trading below its yearly high, meaning it may be undervalued. A patient investor may see good gains in 1–3 years."
-    elif mode == "Momentum":
-        return "The stock has been rising quickly recently, so you might earn quick gains in the next few months. Risk is higher if the trend breaks."
-    elif mode == "Balanced":
-        return "This stock balances growth and stability, meaning moderate returns with medium risk, suitable for steady investors."
-    return "General investment opportunity."
-
-# ------------------------------------------------------
-# SPARKLINE (TREND CHART)
-# ------------------------------------------------------
-def create_sparkline(df):
-    if "Adj Close" in df.columns:
-        price_col = "Adj Close"
-    else:
-        price_col = "Close"
-
-    fig, ax = plt.subplots(figsize=(4, 1))
-    ax.plot(df.index[-60:], df[price_col].tail(60), color="blue")
-    ax.axis("off")
-    buf = BytesIO()
-    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-    buf.seek(0)
-    encoded = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(fig)
-    return f"data:image/png;base64,{encoded}"
-
-# ------------------------------------------------------
-# INVESTMENT SUGGESTION (AMOUNT + DURATION)
-# ------------------------------------------------------
-def investment_plan(row, mode):
-    if mode == "Growth":
-        return "💰 Suggested Investment: ₹50,000 – ₹1,00,000\n⏳ Duration: 6–18 months"
-    elif mode == "Value":
-        return "💰 Suggested Investment: ₹30,000 – ₹80,000\n⏳ Duration: 1–3 years"
-    elif mode == "Momentum":
-        return "💰 Suggested Investment: ₹20,000 – ₹50,000\n⏳ Duration: 1–6 months"
-    elif mode == "Balanced":
-        return "💰 Suggested Investment: ₹40,000 – ₹70,000\n⏳ Duration: 1–2 years"
-    return "💰 Suggested Investment: Flexible\n⏳ Duration: Depends on strategy"
-
-# ------------------------------------------------------
-# MAIN APP
-# ------------------------------------------------------
-st.title("📈 AI-Based Share Market Recommendation Tool")
-
-symbols = st.text_input("Enter stock symbols (comma separated):", "RELIANCE.NS, TCS.NS, INFY.NS")
-ranking_mode = st.selectbox("Choose Ranking Mode", ["Growth", "Value", "Momentum", "Balanced"])
-
-st.info(f"📖 Explanation of {ranking_mode} Strategy: {ranking_explanations[ranking_mode]}")
-
-symbols = [s.strip() for s in symbols.split(",")]
-stock_data = fetch_stock_data(symbols)
-
+# --------------------------
+# FETCH DATA
+# --------------------------
 stock_features = {}
-for sym, df in stock_data.items():
-    stock_features[sym] = compute_features(df)
+for sym in symbols:
+    try:
+        df = yf.download(sym, period="1y", interval="1d", progress=False)
+        if df.empty:
+            continue
+        df = compute_features(df)
+        stock_features[sym] = df
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch {sym}: {e}")
 
+# --------------------------
+# SCORE & RANK
+# --------------------------
 rows = []
 for sym, df in stock_features.items():
-    if df.empty: 
-        continue
     latest = df.iloc[-1]
-    score = calculate_score(latest, ranking_mode)
     rows.append({
-        "Company Name": sym,
         "Symbol": sym,
         "Last": latest["Close"],
-        "Composite Score": score,
-        "ret_60": latest.get("ret_60", np.nan),
-        "pct_to_52w_high": latest.get("pct_to_52w_high", np.nan),
-        "rsi14": latest.get("rsi14", np.nan)
+        "ret_60": latest["ret_60"],
+        "pct_to_52w_high": latest["pct_to_52w_high"],
+        "rsi14": latest["rsi14"]
     })
 
-suggestions = pd.DataFrame(rows).sort_values(by="Composite Score", ascending=False).head(5)
+df_feat = pd.DataFrame(rows).dropna()
 
-if not suggestions.empty:
-    st.subheader("📊 Top Stock Suggestions")
-    st.dataframe(suggestions[["Company Name", "Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]], use_container_width=True)
+if not df_feat.empty:
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df_feat[["ret_60", "pct_to_52w_high", "rsi14"]])
+    df_feat["Composite Score"] = scaled.mean(axis=1)
 
-    st.subheader("📌 Detailed Suggestions (Easy to Understand)")
+    if ranking_mode == "Composite Score":
+        suggestions = df_feat.sort_values("Composite Score", ascending=False).head(5)
+    elif ranking_mode == "3M Momentum":
+        suggestions = df_feat.sort_values("ret_60", ascending=False).head(5)
+    else:
+        suggestions = df_feat.sort_values("pct_to_52w_high", ascending=False).head(5)
+
+    st.subheader("📌 Top Stock Suggestions")
+    st.dataframe(
+        suggestions[["Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]],
+        use_container_width=True
+    )
+
+    # --------------------------
+    # DETAILED GRID SUGGESTIONS
+    # --------------------------
+    st.subheader("📑 Detailed Recommendations")
     cols = st.columns(2)
+
     for i, (_, row) in enumerate(suggestions.iterrows()):
         with cols[i % 2]:
-            sym = row["Symbol"]
-            df = stock_data[sym]
-            sparkline = create_sparkline(df)
-            st.markdown(f"""
-            ### {row['Company Name']}
-            **Current Price:** ₹{row['Last']:.2f}  
-            **Reason (Simple):** {get_reason(row, ranking_mode)}  
-            **Plan:** {investment_plan(row, ranking_mode)}  
+            st.markdown(f"### {row['Symbol']}")
+            st.write(f"💰 Current Price: ₹{row['Last']:.2f}")
+            st.write(f"📊 {get_reason(row, ranking_mode)}")
 
-            <img src="{sparkline}" width="100%" />
-            """, unsafe_allow_html=True)
+            # Sparkline
+            df_hist = stock_features[row["Symbol"]].tail(60)
+            fig, ax = plt.subplots(figsize=(4, 1.5))
+            ax.plot(df_hist["Close"], color=theme["accent"])
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_title("Last 60 days trend", fontsize=8)
+            st.pyplot(fig, use_container_width=True)
 else:
-    st.warning("No valid stock data found. Please check symbols.")
+    st.warning("⚠️ No stock data available right now.")
