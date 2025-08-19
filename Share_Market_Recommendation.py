@@ -1,222 +1,148 @@
-# streamlit_app.py
-# -------------------------------------------------------------
-# India Stocks: Real-time Gainers/Losers + Smart Suggestions
-# -------------------------------------------------------------
-# HOW TO RUN
-# 1) pip install -r requirements.txt  (see requirements list below)
-# 2) streamlit run streamlit_app.py
-#
-# NOTES
-# - Data source for index constituents: Nifty Indices CSV (official) 
-#   NIFTY 50:     https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv
-#   NIFTY 500:    https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv
-# - Live/near-real-time prices fetched from Yahoo Finance via yfinance (delayed).
-# - Predictions are educational only, not investment advice.
-# -------------------------------------------------------------
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import requests
-from io import StringIO
-from datetime import datetime
-from functools import lru_cache
-from typing import List
+import time
+import matplotlib.pyplot as plt
 
-st.set_page_config(
-    page_title="India Stocks Screener & Predictor",
-    page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="📈 Share Market Recommendation", layout="wide")
 
-# ----------------------------
+# ------------------------------------------------------
 # Sidebar Controls
-# ----------------------------
-st.sidebar.title("⚙️ Controls")
-universe_choice = st.sidebar.selectbox(
-    "Universe",
-    ["NIFTY 50", "NIFTY 500"],
-    index=1,
-    help="Choose index universe for scanning.",
-)
-refresh_minutes = st.sidebar.slider("Auto-refresh (minutes)", 0, 10, 1, help="0 disables auto-refresh")
-rank_by = st.sidebar.selectbox(
-    "Rank predictions by",
-    ["Composite Score", "3M Momentum", "Near 52W High", "RSI (Oversold First)"]
-)
-suggestions_count = st.sidebar.slider("# Suggestions", 5, 30, 10)
-risk_pref = st.sidebar.select_slider("Risk preference", options=["Low", "Medium", "High"], value="Medium")
+# ------------------------------------------------------
+st.sidebar.header("⚙️ Settings")
+universe = st.sidebar.selectbox("Select Universe", ["NIFTY 50", "NIFTY 500"])
+refresh_interval = st.sidebar.slider("Auto-refresh interval (seconds)", 30, 300, 60)
+ranking_mode = st.sidebar.selectbox("Ranking Mode", ["Composite", "3M Momentum", "Near 52W High"])
 
-if refresh_minutes > 0:
-    st.experimental_set_query_params(_=str(int(datetime.utcnow().timestamp()) // (refresh_minutes*60 if refresh_minutes else 1)))
-
-# ----------------------------
-# Helpers
-# ----------------------------
-NIFTY_50_CSV = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
-NIFTY_500_CSV = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
-
-@lru_cache(maxsize=8)
-def fetch_index_constituents(url: str) -> pd.DataFrame:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(StringIO(r.text))
-    df.columns = [c.strip() for c in df.columns]
-    if "Symbol" in df.columns:
-        df["Yahoo"] = df["Symbol"].str.strip() + ".NS"
-    elif "SYMBOL" in df.columns:
-        df["Yahoo"] = df["SYMBOL"].str.strip() + ".NS"
-    return df
-
-@st.cache_data(ttl=60*15)
-def get_universe(choice: str) -> pd.DataFrame:
-    if choice == "NIFTY 50":
-        return fetch_index_constituents(NIFTY_50_CSV)
-    return fetch_index_constituents(NIFTY_500_CSV)
-
-@st.cache_data(ttl=60)
-def batch_latest_quote(yahoo_symbols: List[str]) -> pd.DataFrame:
-    tickers = " ".join(yahoo_symbols)
-    data = yf.download(tickers=tickers, period="2d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
-
-    rows = []
-    if isinstance(data.columns, pd.MultiIndex):
-        for sym in yahoo_symbols:
-            try:
-                df = data[sym]
-                if df.shape[0] >= 2:
-                    prev_close = float(df.iloc[-2]["Close"])
-                    last = float(df.iloc[-1]["Close"])
-                    pct = (last - prev_close) / prev_close * 100.0
-                    rows.append((sym, last, prev_close, pct))
-            except Exception:
-                continue
-    quotes = pd.DataFrame(rows, columns=["Yahoo", "Last", "PrevClose", "%Chg"])
-    return quotes
-
-@st.cache_data(ttl=60*60)
-def get_history(yahoo_symbols: List[str], period="2y") -> dict:
-    hist = {}
-    batch = 50
-    for i in range(0, len(yahoo_symbols), batch):
-        chunk = yahoo_symbols[i:i+batch]
-        df = yf.download(" ".join(chunk), period=period, interval="1d", group_by="ticker", auto_adjust=True, threads=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            for sym in chunk:
-                try:
-                    h = df[sym].dropna()
-                    if not h.empty:
-                        hist[sym] = h
-                except Exception:
-                    continue
-    return hist
-
-# Technicals
-
-def compute_indicators(price: pd.DataFrame) -> pd.DataFrame:
-    x = price.copy()
-    c = x["Close"].astype(float)
-    x["ret_60"] = c.pct_change(60)
-    x["rsi14"] = 100 - (100 / (1 + (c.diff().clip(lower=0).rolling(14).mean() / (-c.diff().clip(upper=0)).rolling(14).mean().replace(0, np.nan))))
-    x["roll_max_252"] = c.rolling(252).max()
-    x["pct_to_52w_high"] = (c / x["roll_max_252"]) - 1
-    return x
-
-def composite_score(latest: pd.Series, risk: str) -> float:
-    score = 0.0
-    score += 1.0 * (latest.get("ret_60", 0) or 0)
-    score += 1.25 * (latest.get("pct_to_52w_high", -1) or -1)
-    return float(score)
-
-# ----------------------------
-# Data Pipeline
-# ----------------------------
-universe_df = get_universe(universe_choice)
-st.title("🇮🇳 India Stocks Screener & Predictor")
-st.caption("Top gainers/losers (near-real-time) and data-driven suggestions. ✦ Educational use only, not investment advice.")
-
-# Movers
-symbols = universe_df["Yahoo"].dropna().unique().tolist()
-quotes = batch_latest_quote(symbols)
-merged = universe_df.merge(quotes, on="Yahoo", how="inner")
-
-gainers = merged.sort_values("%Chg", ascending=False).head(20)
-losers = merged.sort_values("%Chg", ascending=True).head(20)
-
-c1, c2 = st.columns(2)
-with c1:
-    st.write("**Top 20 Gainers**")
-    st.dataframe(gainers[["Company Name", "Symbol", "Last", "%Chg"]].set_index("Symbol"))
-with c2:
-    st.write("**Top 20 Losers**")
-    st.dataframe(losers[["Company Name", "Symbol", "Last", "%Chg"]].set_index("Symbol"))
-
-st.divider()
-
-# Predictions / Suggestions
-st.subheader("🤖 Smart Suggestions")
-
-hist = get_history(symbols, period="2y")
-rows = []
-for sym, h in hist.items():
-    ind = compute_indicators(h)
-    if ind.empty: continue
-    latest = ind.iloc[-1]
-    score = composite_score(latest, risk_pref)
-    rows.append({
-        "Symbol": sym.replace(".NS", ""),
-        "Yahoo": sym,
-        "Last": float(ind["Close"].iloc[-1]),
-        "ret_60": float(latest.get("ret_60", np.nan)),
-        "rsi14": float(latest.get("rsi14", np.nan)),
-        "pct_to_52w_high": float(latest.get("pct_to_52w_high", np.nan)),
-        "Composite Score": score,
-    })
-
-pred_df = pd.DataFrame(rows)
-if rank_by == "3M Momentum":
-    pred_df = pred_df.sort_values("ret_60", ascending=False)
-elif rank_by == "Near 52W High":
-    pred_df = pred_df.sort_values("pct_to_52w_high", ascending=False)
-elif rank_by == "RSI (Oversold First)":
-    pred_df = pred_df.sort_values("rsi14", ascending=True)
+# ------------------------------------------------------
+# Stock Universe (example tickers — replace with full list)
+# ------------------------------------------------------
+if universe == "NIFTY 50":
+    symbols = ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ICICIBANK.NS"]
 else:
-    pred_df = pred_df.sort_values("Composite Score", ascending=False)
+    symbols = ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ICICIBANK.NS", "SBIN.NS", "LT.NS"]
 
-suggestions = pred_df.head(suggestions_count)
-suggestions = suggestions.merge(universe_df[["Symbol", "Company Name", "Yahoo"]], on="Yahoo", how="left")
+# ------------------------------------------------------
+# Fetch Market Data
+# ------------------------------------------------------
+@st.cache_data(ttl=refresh_interval)
+def get_data(symbols):
+    data = {}
+    for sym in symbols:
+        try:
+            df = yf.download(sym, period="6mo", interval="1d", progress=False)
+            if not df.empty:
+                df["Symbol"] = sym
+                data[sym] = df
+        except Exception as e:
+            st.warning(f"Error fetching {sym}: {e}")
+    return data
 
-st.write("**Suggested candidates (not advice):**")
-st.dataframe(
-    suggestions[["Company Name", "Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]]
-    .set_index("Symbol")
-    .style.format({"Last": "₹{:.2f}", "Composite Score": "{:.3f}", "ret_60": "{:.2%}", "pct_to_52w_high": "{:.2%}", "rsi14": "{:.1f}"})
-)
+market_data = get_data(symbols)
 
-# 3M Momentum Chart if selected
-if rank_by == "3M Momentum" and not suggestions.empty:
-    st.subheader("📈 3-Month Return Trendlines for Top Picks")
-    import plotly.express as px
-    for sym in suggestions["Yahoo"].tolist():
-        h = hist.get(sym)
-        if h is not None and not h.empty:
-            h3m = h.tail(90).reset_index()
-            h3m["Return"] = h3m["Close"].pct_change().cumsum()
-            fig = px.line(h3m, x="Date", y="Return", title=f"{sym.replace('.NS','')} - 3M Cumulative Return")
-            st.plotly_chart(fig, use_container_width=True)
+# ------------------------------------------------------
+# Compute Metrics
+# ------------------------------------------------------
+suggestions = []
+for sym, df in market_data.items():
+    try:
+        last_price = df["Close"].iloc[-1]
+        ret_60 = (last_price / df["Close"].iloc[-60] - 1) * 100 if len(df) > 60 else np.nan
+        high_52w = df["High"].max()
+        pct_to_52w_high = ((high_52w - last_price) / high_52w) * 100 if high_52w else np.nan
+        # RSI
+        delta = df["Close"].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        rsi14 = 100 - (100 / (1 + rs.iloc[-1])) if not loss.isna().all() else np.nan
 
-# Footer
-st.caption("Data via Yahoo Finance (delayed). Predictions are heuristic, for research/education only.")
+        composite_score = (
+            (ret_60 if not np.isnan(ret_60) else 0)
+            - (pct_to_52w_high if not np.isnan(pct_to_52w_high) else 0)
+            + ((50 - abs(rsi14 - 50)) if not np.isnan(rsi14) else 0)
+        )
 
-# ----------------------------
-# REQUIREMENTS (requirements.txt)
-# ----------------------------
-# streamlit>=1.36
-# yfinance>=0.2.40
-# pandas>=2.2
-# numpy>=1.26
-# plotly>=5.22
-# requests>=2.31
+        suggestions.append({
+            "Company Name": sym.replace(".NS", ""),
+            "Symbol": sym,
+            "Last": round(last_price, 2),
+            "Composite Score": round(composite_score, 2),
+            "ret_60": round(ret_60, 2) if not np.isnan(ret_60) else None,
+            "pct_to_52w_high": round(pct_to_52w_high, 2) if not np.isnan(pct_to_52w_high) else None,
+            "rsi14": round(rsi14, 2) if not np.isnan(rsi14) else None,
+            "data": df  # keep full dataframe for sparkline
+        })
+    except Exception as e:
+        st.warning(f"Error processing {sym}: {e}")
+
+suggestions = pd.DataFrame(suggestions)
+
+# ------------------------------------------------------
+# Ranking
+# ------------------------------------------------------
+if ranking_mode == "Composite":
+    suggestions = suggestions.sort_values("Composite Score", ascending=False)
+elif ranking_mode == "3M Momentum":
+    suggestions = suggestions.sort_values("ret_60", ascending=False)
+elif ranking_mode == "Near 52W High":
+    suggestions = suggestions.sort_values("pct_to_52w_high", ascending=True)
+
+# ------------------------------------------------------
+# Display Suggestions Table
+# ------------------------------------------------------
+st.subheader("📊 Suggested Stocks")
+
+cols_to_show = ["Company Name", "Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]
+existing_cols = [c for c in cols_to_show if c in suggestions.columns]
+
+if not suggestions.empty and existing_cols:
+    st.dataframe(suggestions[existing_cols])
+else:
+    st.warning("No matching columns found in suggestions.")
+
+# ------------------------------------------------------
+# Detailed Suggestions with Sparkline
+# ------------------------------------------------------
+st.subheader("💡 Detailed Reasons for Suggestions")
+
+def get_reason(row, ranking_mode):
+    reasons = []
+    if ranking_mode == "Composite":
+        reasons.append(f"Composite Score = {row.get('Composite Score', 'N/A')} → Balanced technical & fundamental strength.")
+    if ranking_mode == "3M Momentum":
+        reasons.append(f"3-month return = {row.get('ret_60', 'N/A')}% → Strong upward momentum.")
+    if ranking_mode == "Near 52W High":
+        reasons.append(f"{row.get('pct_to_52w_high', 'N/A')}% away from 52W high → Possible breakout candidate.")
+    if "rsi14" in row and row["rsi14"] is not None:
+        if row["rsi14"] < 30:
+            reasons.append(f"RSI {row['rsi14']} → Oversold, rebound possible.")
+        elif row["rsi14"] > 70:
+            reasons.append(f"RSI {row['rsi14']} → Overbought, risk of pullback.")
+        else:
+            reasons.append(f"RSI {row['rsi14']} → Neutral zone.")
+    return " | ".join(reasons)
+
+if not suggestions.empty:
+    top_n = suggestions.head(5)  # Show top 5 detailed suggestions
+    for _, row in top_n.iterrows():
+        st.markdown(f"""
+        ### 🏦 {row.get('Company Name', row.get('Symbol', 'Unknown'))}
+        **Symbol:** {row.get('Symbol', 'N/A')}  
+        **Last Price:** ₹{row.get('Last', 'N/A')}  
+
+        **Reason:** {get_reason(row, ranking_mode)}
+        """)
+        
+        # Sparkline for last 60 days
+        df = row["data"]
+        if len(df) > 60:
+            prices = df["Close"].tail(60)
+        else:
+            prices = df["Close"]
+        fig, ax = plt.subplots(figsize=(5,1.5))
+        ax.plot(prices.index, prices.values, color="blue", linewidth=2)
+        ax.fill_between(prices.index, prices.values, prices.values.min(), color="blue", alpha=0.1)
+        ax.axis("off")
+        st.pyplot(fig)
