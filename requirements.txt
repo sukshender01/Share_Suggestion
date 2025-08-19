@@ -1,7 +1,4 @@
-streamlit
-pandas
-yfinance
-numpy
-matplotlib
-scikit-learn
-lxml
+streamlit==1.38.0
+yfinance==0.2.54
+pandas==2.2.2
+numpy==1.26.4
