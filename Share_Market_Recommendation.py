@@ -2,86 +2,79 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import time
 import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="📈 Share Market Recommendation", layout="wide")
+# ----------------------------------------
+# CONFIG
+# ----------------------------------------
+st.set_page_config(page_title="Stock Suggestions App", layout="wide")
 
-# ------------------------------------------------------
-# Sidebar Controls
-# ------------------------------------------------------
+# Sidebar configuration
 st.sidebar.header("⚙️ Settings")
-universe = st.sidebar.selectbox("Select Universe", ["NIFTY 50", "NIFTY 500"])
-refresh_interval = st.sidebar.slider("Auto-refresh interval (seconds)", 30, 300, 60)
+universe = st.sidebar.radio("Select Universe", ["NIFTY 50", "NIFTY 500"])
 ranking_mode = st.sidebar.selectbox("Ranking Mode", ["Composite", "3M Momentum", "Near 52W High"])
+refresh_interval = st.sidebar.slider("Auto-refresh interval (seconds)", 30, 300, 60)
 
-# ------------------------------------------------------
-# Stock Universe (example tickers — replace with full list)
-# ------------------------------------------------------
+# Placeholder universe lists (replace with NSE symbols for NIFTY 50/500)
 if universe == "NIFTY 50":
-    symbols = ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ICICIBANK.NS"]
+    stock_list = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
 else:
-    symbols = ["RELIANCE.NS", "HDFCBANK.NS", "INFY.NS", "TCS.NS", "ICICIBANK.NS", "SBIN.NS", "LT.NS"]
+    stock_list = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", "SBIN.NS", "LT.NS"]
 
-# ------------------------------------------------------
-# Fetch Market Data
-# ------------------------------------------------------
+# ----------------------------------------
+# Fetch stock data
+# ----------------------------------------
 @st.cache_data(ttl=refresh_interval)
-def get_data(symbols):
+def fetch_data(symbols):
+    end = datetime.today()
+    start = end - timedelta(days=365)
     data = {}
-    for sym in symbols:
+    for symbol in symbols:
         try:
-            df = yf.download(sym, period="6mo", interval="1d", progress=False)
+            df = yf.download(symbol, start=start, end=end, progress=False)
             if not df.empty:
-                df["Symbol"] = sym
-                data[sym] = df
+                df["Symbol"] = symbol
+                data[symbol] = df
         except Exception as e:
-            st.warning(f"Error fetching {sym}: {e}")
+            st.error(f"Error fetching {symbol}: {e}")
     return data
 
-market_data = get_data(symbols)
+data_dict = fetch_data(stock_list)
 
-# ------------------------------------------------------
-# Compute Metrics
-# ------------------------------------------------------
+# ----------------------------------------
+# Prepare suggestions DataFrame
+# ----------------------------------------
 suggestions = []
-for sym, df in market_data.items():
-    try:
-        last_price = df["Close"].iloc[-1]
-        ret_60 = (last_price / df["Close"].iloc[-60] - 1) * 100 if len(df) > 60 else np.nan
-        high_52w = df["High"].max()
-        pct_to_52w_high = ((high_52w - last_price) / high_52w) * 100 if high_52w else np.nan
-        # RSI
-        delta = df["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        rsi14 = 100 - (100 / (1 + rs.iloc[-1])) if not loss.isna().all() else np.nan
+for symbol, df in data_dict.items():
+    last_price = df["Close"].iloc[-1]
+    ret_60 = ((df["Close"].iloc[-1] / df["Close"].iloc[-60]) - 1) * 100 if len(df) > 60 else np.nan
+    pct_to_52w_high = ((df["Close"].iloc[-1] / df["Close"].max()) - 1) * 100
+    rsi14 = np.nan
+    delta = df["Close"].diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    if len(up) > 14:
+        avg_gain = up.rolling(14).mean()
+        avg_loss = down.rolling(14).mean()
+        rs = avg_gain / avg_loss
+        rsi14 = 100 - (100 / (1 + rs.iloc[-1]))
 
-        composite_score = (
-            (ret_60 if not np.isnan(ret_60) else 0)
-            - (pct_to_52w_high if not np.isnan(pct_to_52w_high) else 0)
-            + ((50 - abs(rsi14 - 50)) if not np.isnan(rsi14) else 0)
-        )
+    composite = np.nanmean([ret_60, -abs(pct_to_52w_high), (50 - abs(rsi14 - 50))])
 
-        suggestions.append({
-            "Company Name": sym.replace(".NS", ""),
-            "Symbol": sym,
-            "Last": round(last_price, 2),
-            "Composite Score": round(composite_score, 2),
-            "ret_60": round(ret_60, 2) if not np.isnan(ret_60) else None,
-            "pct_to_52w_high": round(pct_to_52w_high, 2) if not np.isnan(pct_to_52w_high) else None,
-            "rsi14": round(rsi14, 2) if not np.isnan(rsi14) else None,
-            "data": df  # keep full dataframe for sparkline
-        })
-    except Exception as e:
-        st.warning(f"Error processing {sym}: {e}")
+    suggestions.append({
+        "Company Name": symbol.replace(".NS", ""),
+        "Symbol": symbol,
+        "Last": last_price,
+        "ret_60": ret_60,
+        "pct_to_52w_high": pct_to_52w_high,
+        "rsi14": rsi14,
+        "Composite Score": composite
+    })
 
-suggestions = pd.DataFrame(suggestions)
+suggestions = pd.DataFrame(suggestions).dropna()
 
-# ------------------------------------------------------
-# Ranking
-# ------------------------------------------------------
+# Ranking logic
 if ranking_mode == "Composite":
     suggestions = suggestions.sort_values("Composite Score", ascending=False)
 elif ranking_mode == "3M Momentum":
@@ -89,12 +82,17 @@ elif ranking_mode == "3M Momentum":
 elif ranking_mode == "Near 52W High":
     suggestions = suggestions.sort_values("pct_to_52w_high", ascending=True)
 
-# ------------------------------------------------------
+# ----------------------------------------
 # Display Suggestions Table
-# ------------------------------------------------------
+# ----------------------------------------
 st.subheader("📊 Suggested Stocks")
 
-cols_to_show = ["Company Name", "Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]
+cols_to_show = [
+    "Company Name", "Symbol", "Last",
+    "Composite Score", "ret_60",
+    "pct_to_52w_high", "rsi14"
+]
+
 existing_cols = [c for c in cols_to_show if c in suggestions.columns]
 
 if not suggestions.empty and existing_cols:
@@ -102,30 +100,30 @@ if not suggestions.empty and existing_cols:
 else:
     st.warning("No matching columns found in suggestions.")
 
-# ------------------------------------------------------
+# ----------------------------------------
 # Detailed Suggestions with Sparkline
-# ------------------------------------------------------
+# ----------------------------------------
 st.subheader("💡 Detailed Reasons for Suggestions")
 
 def get_reason(row, ranking_mode):
     reasons = []
     if ranking_mode == "Composite":
-        reasons.append(f"Composite Score = {row.get('Composite Score', 'N/A')} → Balanced technical & fundamental strength.")
+        reasons.append(f"Composite Score = {row.get('Composite Score', 'N/A'):.2f}, strong fundamentals + technicals.")
     if ranking_mode == "3M Momentum":
-        reasons.append(f"3-month return = {row.get('ret_60', 'N/A')}% → Strong upward momentum.")
+        reasons.append(f"3-month return (ret_60) = {row.get('ret_60', 'N/A'):.2f}%, strong momentum.")
     if ranking_mode == "Near 52W High":
-        reasons.append(f"{row.get('pct_to_52w_high', 'N/A')}% away from 52W high → Possible breakout candidate.")
-    if "rsi14" in row and row["rsi14"] is not None:
+        reasons.append(f"{row.get('pct_to_52w_high', 'N/A'):.2f}% away from 52W high — possible breakout.")
+    if "rsi14" in row:
         if row["rsi14"] < 30:
-            reasons.append(f"RSI {row['rsi14']} → Oversold, rebound possible.")
+            reasons.append(f"RSI {row['rsi14']:.2f} → Oversold, rebound likely.")
         elif row["rsi14"] > 70:
-            reasons.append(f"RSI {row['rsi14']} → Overbought, risk of pullback.")
+            reasons.append(f"RSI {row['rsi14']:.2f} → Overbought, caution.")
         else:
-            reasons.append(f"RSI {row['rsi14']} → Neutral zone.")
+            reasons.append(f"RSI {row['rsi14']:.2f} → Neutral zone.")
     return " | ".join(reasons)
 
 if not suggestions.empty:
-    top_n = suggestions.head(5)  # Show top 5 detailed suggestions
+    top_n = suggestions.head(5)  # Show top 5
     for _, row in top_n.iterrows():
         st.markdown(f"""
         ### 🏦 {row.get('Company Name', row.get('Symbol', 'Unknown'))}
@@ -134,15 +132,13 @@ if not suggestions.empty:
 
         **Reason:** {get_reason(row, ranking_mode)}
         """)
-        
-        # Sparkline for last 60 days
-        df = row["data"]
-        if len(df) > 60:
-            prices = df["Close"].tail(60)
-        else:
-            prices = df["Close"]
-        fig, ax = plt.subplots(figsize=(5,1.5))
-        ax.plot(prices.index, prices.values, color="blue", linewidth=2)
-        ax.fill_between(prices.index, prices.values, prices.values.min(), color="blue", alpha=0.1)
-        ax.axis("off")
-        st.pyplot(fig)
+
+        # Add Sparkline (last 60 days)
+        if row["Symbol"] in data_dict:
+            df = data_dict[row["Symbol"]].tail(60)
+            fig, ax = plt.subplots(figsize=(6, 2))
+            ax.plot(df.index, df["Close"], color="blue")
+            ax.set_title("Last 60 Days Price Trend", fontsize=8)
+            ax.tick_params(axis="x", labelsize=6)
+            ax.tick_params(axis="y", labelsize=6)
+            st.pyplot(fig)
