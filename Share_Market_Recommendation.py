@@ -1,166 +1,182 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
+import yfinance as yf
 import numpy as np
 import matplotlib.pyplot as plt
-import io
-from datetime import datetime, timedelta
+from io import BytesIO
+from sklearn.preprocessing import MinMaxScaler
+import random
 
-st.set_page_config(page_title="Indian Share Recommendation App", layout="wide")
+# ----------------------------
+# Theme Selection
+# ----------------------------
+theme_choice = st.sidebar.selectbox(
+    "🎨 Select Theme",
+    ["Light", "Dark", "Minimal", "Vibrant"]
+)
 
-# --------------------------------------------------
-# Utility Functions
-# --------------------------------------------------
-def fetch_stock_data(symbols, period="6mo"):
-    data = {}
-    for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym)
-            hist = ticker.history(period=period)
-            if not hist.empty:
-                data[sym] = hist
-        except Exception as e:
-            st.warning(f"Failed to fetch {sym}: {e}")
-    return data
-
-
-def compute_indicators(hist):
-    df = hist.copy()
-    df["return"] = df["Close"].pct_change()
-    df["cum_return"] = (1 + df["return"]).cumprod() - 1
-    df["rolling_mean"] = df["Close"].rolling(20).mean()
-    df["rolling_std"] = df["Close"].rolling(20).std()
-    df["upper_band"] = df["rolling_mean"] + (df["rolling_std"] * 2)
-    df["lower_band"] = df["rolling_mean"] - (df["rolling_std"] * 2)
-
-    # RSI
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    df["rsi14"] = 100 - (100 / (1 + rs))
-
-    return df
-
-
-def get_reason(row, ranking_mode):
-    try:
-        rsi = row.get("rsi14", None)
-        momentum = row.get("ret_60", None)
-        pct_to_high = row.get("pct_to_52w_high", None)
-
-        if rsi is not None and rsi < 30:
-            return "RSI indicates the stock may be oversold (possible bounce)."
-        elif rsi is not None and rsi > 70:
-            return "RSI indicates the stock may be overbought (watch for correction)."
-
-        if ranking_mode == "3M Momentum" and momentum is not None:
-            return f"Strong positive momentum over last 3 months ({momentum:.2f}%)."
-        elif ranking_mode == "Near 52W High" and pct_to_high is not None:
-            return f"Trading near 52-week high ({pct_to_high:.2f}% away)."
-        elif ranking_mode == "Composite Score":
-            return "Selected based on composite scoring (valuation + momentum + RSI)."
-
-        return "Promising stock based on available metrics."
-    except Exception as e:
-        return f"Reason unavailable (error: {e})"
-
-
-def plot_sparkline(prices):
-    fig, ax = plt.subplots(figsize=(4, 1))
-    ax.plot(prices, color="blue")
-    ax.axis("off")
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
-    return buf
-
-
-# --------------------------------------------------
-# App Sidebar
-# --------------------------------------------------
-st.sidebar.header("Configuration")
-
-universe = st.sidebar.radio("Select Universe", ["NIFTY 50", "NIFTY 500"])
-ranking_mode = st.sidebar.radio("Ranking Mode", ["Composite Score", "3M Momentum", "Near 52W High"])
-refresh_interval = st.sidebar.selectbox("Auto-refresh Interval (seconds)", [0, 30, 60, 120], index=2)
-
-# Symbols for demo
-if universe == "NIFTY 50":
-    symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-else:
-    symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS",
-               "LT.NS", "SBIN.NS", "BHARTIARTL.NS", "KOTAKBANK.NS", "ASIANPAINT.NS"]
-
-# --------------------------------------------------
-# Fetch & Process
-# --------------------------------------------------
-with st.spinner("Fetching stock data..."):
-    data = fetch_stock_data(symbols, period="6mo")
-
-results = []
-for sym, hist in data.items():
-    df = compute_indicators(hist)
-    if df.empty:
-        continue
-
-    last = df["Close"].iloc[-1]
-    ret_60 = (df["Close"].iloc[-1] / df["Close"].iloc[-60] - 1) * 100 if len(df) > 60 else np.nan
-    pct_to_52w_high = (df["Close"].iloc[-1] / df["Close"].max() - 1) * 100
-    rsi14 = df["rsi14"].iloc[-1]
-
-    composite = 0
-    if not np.isnan(ret_60):
-        composite += ret_60
-    if not np.isnan(rsi14):
-        composite += (50 - abs(rsi14 - 50))
-    if not np.isnan(pct_to_52w_high):
-        composite += (-pct_to_52w_high)
-
-    results.append({
-        "Symbol": sym,
-        "Last": last,
-        "ret_60": ret_60,
-        "pct_to_52w_high": pct_to_52w_high,
-        "rsi14": rsi14,
-        "Composite Score": composite,
-        "History": df
-    })
-
-df_res = pd.DataFrame(results)
-
-if ranking_mode == "Composite Score":
-    suggestions = df_res.sort_values("Composite Score", ascending=False).head(5)
-elif ranking_mode == "3M Momentum":
-    suggestions = df_res.sort_values("ret_60", ascending=False).head(5)
-elif ranking_mode == "Near 52W High":
-    suggestions = df_res.sort_values("pct_to_52w_high", ascending=True).head(5)
-else:
-    suggestions = df_res.head(5)
-
-# --------------------------------------------------
-# Display
-# --------------------------------------------------
-st.header("📈 Suggested Stocks")
-
-if not suggestions.empty:
-    st.dataframe(
-        suggestions[["Symbol", "Last", "Composite Score", "ret_60", "pct_to_52w_high", "rsi14"]],
-        use_container_width=True  # ✅ fixed deprecation
+if theme_choice == "Dark":
+    st.markdown(
+        """
+        <style>
+        .stApp {background-color: #111; color: #eee;}
+        </style>
+        """, unsafe_allow_html=True
+    )
+elif theme_choice == "Minimal":
+    st.markdown(
+        """
+        <style>
+        .stApp {background-color: #f7f7f7; color: #333;}
+        </style>
+        """, unsafe_allow_html=True
+    )
+elif theme_choice == "Vibrant":
+    st.markdown(
+        """
+        <style>
+        .stApp {background-color: #fff0f5; color: #222;}
+        </style>
+        """, unsafe_allow_html=True
     )
 
-    st.subheader("Detailed Suggestions")
+# ----------------------------
+# Ranking Explanation
+# ----------------------------
+ranking_explanations = {
+    "Composite Score": "This ranks stocks based on a mix of growth, stability, and momentum. Good for medium investment with balanced risk.",
+    "3M Momentum": "This checks performance over the past 3 months. Higher momentum = higher chance of quick profits, but with more risk. Best for short to medium term investment.",
+    "Near 52W High": "Stocks close to their 52-week high usually show strength. Safer bets, good for medium to long-term holding."
+}
 
-    for _, row in suggestions.iterrows():
-        col1, col2 = st.columns([3, 1])
+# ----------------------------
+# Fetch Data
+# ----------------------------
+@st.cache_data
+def load_data(symbols):
+    data = yf.download(symbols, period="6mo", interval="1d", progress=False, group_by='ticker')
+    return data
 
-        with col1:
-            st.markdown(f"### {row['Symbol']}")
-            st.markdown(f"**Last Price:** {row['Last']:.2f}")
-            st.markdown(f"**Reason:** {get_reason(row.to_dict(), ranking_mode)}")
+symbols = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]  # sample universe
+data = load_data(symbols)
 
-        with col2:
-            spark_buf = plot_sparkline(row["History"]["Close"].tail(60).values)
-            st.image(spark_buf, use_container_width=True)  # ✅ fixed deprecation
-else:
-    st.warning("No stock suggestions available right now.")
+# ----------------------------
+# Feature Engineering
+# ----------------------------
+def compute_features(df):
+    df['ret_60'] = df['Adj Close'].pct_change(60)
+    df['52w_high'] = df['High'].rolling(252, min_periods=1).max()
+    df['pct_to_52w_high'] = (df['Adj Close'] / df['52w_high'] - 1) * 100
+    df['rsi14'] = compute_rsi(df['Adj Close'], 14)
+    return df
+
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+stock_features = {}
+for sym in symbols:
+    df = data[sym].copy()
+    stock_features[sym] = compute_features(df)
+
+# ----------------------------
+# Ranking Function
+# ----------------------------
+def rank_stocks(ranking_mode="Composite Score"):
+    scores = []
+    for sym, df in stock_features.items():
+        last_row = df.iloc[-1]
+        try:
+            if ranking_mode == "Composite Score":
+                score = (
+                    0.4 * last_row["ret_60"] +
+                    0.3 * (-last_row["pct_to_52w_high"]) +
+                    0.3 * (50 - abs(50 - last_row["rsi14"]))
+                )
+            elif ranking_mode == "3M Momentum":
+                score = last_row["ret_60"]
+            elif ranking_mode == "Near 52W High":
+                score = -last_row["pct_to_52w_high"]
+            else:
+                score = 0
+        except Exception:
+            score = 0
+        scores.append((sym, score, last_row))
+    ranked = sorted(scores, key=lambda x: x[1], reverse=True)
+    return ranked
+
+# ----------------------------
+# Reasoning Function
+# ----------------------------
+def get_reason(row, ranking_mode):
+    reasons = []
+    if "rsi14" in row and pd.notna(row["rsi14"]):
+        if row["rsi14"] < 30:
+            reasons.append("Stock looks oversold → could bounce back.")
+        elif row["rsi14"] > 70:
+            reasons.append("Stock is overbought → might cool off.")
+    if "ret_60" in row and pd.notna(row["ret_60"]):
+        if row["ret_60"] > 0:
+            reasons.append("It has shown gains in the last 3 months.")
+        else:
+            reasons.append("It has lost in the last 3 months.")
+    if "pct_to_52w_high" in row and pd.notna(row["pct_to_52w_high"]):
+        if row["pct_to_52w_high"] > -5:
+            reasons.append("Close to its yearly high → strong momentum.")
+        else:
+            reasons.append("Far from yearly high → may recover if trend reverses.")
+    return " ".join(reasons)
+
+# ----------------------------
+# Investment Suggestion
+# ----------------------------
+def get_investment_plan(row, ranking_mode):
+    amount_options = ["₹10,000", "₹25,000", "₹50,000+"]
+    duration = {
+        "Composite Score": "6–12 months (medium term)",
+        "3M Momentum": "1–3 months (short term, quick gains)",
+        "Near 52W High": "1–2 years (long term hold)"
+    }
+    risk = {
+        "Composite Score": "Moderate risk with balanced return potential.",
+        "3M Momentum": "High risk, but can deliver faster returns.",
+        "Near 52W High": "Lower risk, steady returns expected."
+    }
+    chosen_amount = random.choice(amount_options)
+    return f"💰 Suggested Investment: {chosen_amount}\n⏳ Suggested Duration: {duration[ranking_mode]}\n⚠️ Risk Level: {risk[ranking_mode]}"
+
+# ----------------------------
+# Sparkline Plot
+# ----------------------------
+def plot_sparkline(prices):
+    fig, ax = plt.subplots(figsize=(4, 1))
+    ax.plot(prices, color="green")
+    ax.axis("off")
+    buf = BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+    buf.seek(0)
+    return buf
+
+# ----------------------------
+# UI Layout
+# ----------------------------
+st.title("📈 Smart Stock Suggestions (India)")
+
+ranking_mode = st.selectbox("Ranking Mode", ["Composite Score", "3M Momentum", "Near 52W High"])
+st.markdown(f"ℹ️ **{ranking_explanations[ranking_mode]}**")
+
+ranked = rank_stocks(ranking_mode)
+
+st.subheader("📊 Suggested Stocks")
+
+cols = st.columns(2)
+for i, (sym, score, row) in enumerate(ranked[:6]):
+    col = cols[i % 2]
+    with col:
+        st.markdown(f"### {sym}")
+        st.image(plot_sparkline(stock_features[sym]['Adj Close'].tail(60)))
+        st.markdown(f"**Reason:** {get_reason(row, ranking_mode)}")
+        st.markdown(get_investment_plan(row, ranking_mode))
